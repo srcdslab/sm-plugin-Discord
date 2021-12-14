@@ -1,5 +1,5 @@
 #include <sourcemod>
-#include <SteamWorks>
+#include <ripext>
 #include <sourcecomms>
 
 #define PLUGIN_VERSION "1.0"
@@ -70,23 +70,12 @@ void StoreMsg(char sWebhook[64], char sMessageDiscord[4096])
 		return;
 	}
 
-	// Sanity checks
-	if (StrContains(sMessageDiscord, "\\") != -1 && StrContains(sMessageDiscord, "\\n") == -1)
-		ReplaceString(sMessageDiscord, sizeof(sMessageDiscord), "\\", "\\\\");
+	JSONObject message = new JSONObject();
 
-	// If the message dosn't start with a '{' it's not for a JSON formated message, lets fix that!
-	if(StrContains(sMessageDiscord, "{") != 0)
-	{
-		// Sanity checks
-		if(StrContains(sMessageDiscord, "\"") != -1)
-			ReplaceString(sMessageDiscord, sizeof(sMessageDiscord), "\"", "\\\"");
-
-		Format(sMessageDiscord, sizeof(sMessageDiscord), "{\"content\":\"%s\"}", sMessageDiscord);
-	}
-
-	// Re-Format for Slack
 	if(StrContains(sUrl, "slack") != -1)
-		ReplaceString(sMessageDiscord, sizeof(sMessageDiscord), "\"content\":", "\"text\":");
+		message.SetString("text", sMessageDiscord); // Slack
+	else
+		message.SetString("content", sMessageDiscord); // Discord
 
 	if (g_aWebhook == null)
 	{
@@ -95,7 +84,7 @@ void StoreMsg(char sWebhook[64], char sMessageDiscord[4096])
 	}
 
 	g_aWebhook.PushString(sWebhook);
-	g_aMsgs.PushString(sMessageDiscord);
+	g_aMsgs.Push(message);
 }
 
 public Action Timer_SendNextMessage(Handle timer, any data)
@@ -117,74 +106,67 @@ void SendNextMsg()
 	char sWebhook[64]
 	g_aWebhook.GetString(0, sWebhook, sizeof(sWebhook));
 	
-	char sMessage[4096];
-	g_aMsgs.GetString(0, sMessage, sizeof(sMessage));
-	
+	JSONObject message = g_aMsgs.Get(0);
+
 	char sUrl[512];
 	if(!GetWebHook(sWebhook, sUrl, sizeof(sUrl)))
 	{
 		LogError("Webhook config not found or invalid! Webhook: %s Url: %s", sWebhook, sUrl);
-		LogError("Message: %s", sMessage);
 		return;
 	}
 
-	Handle hRequest = SteamWorks_CreateHTTPRequest(k_EHTTPMethodPOST, sUrl);
-	if(!hRequest || !SteamWorks_SetHTTPCallbacks(hRequest, view_as<SteamWorksHTTPRequestCompleted>(OnRequestComplete)) 
-				|| !SteamWorks_SetHTTPRequestRawPostBody(hRequest, "application/json", sMessage, strlen(sMessage))
-				|| !SteamWorks_SendHTTPRequest(hRequest))
-	{
-		delete hRequest;
-		LogError("SendNextMsg: Failed To Send Message");
-		return;
-	}
+	HTTPRequest request = new HTTPRequest(sUrl);
+
+	request.Post(message, OnMessageSended);
 
 	// Don't Send new messages aslong we wait for a reply from this one
 	g_bSending = true;
 }
 
-public int OnRequestComplete(Handle hRequest, bool bFailed, bool bRequestSuccessful, EHTTPStatusCode eStatusCode)
+void OnMessageSended(HTTPResponse response, any value)
 {
-	// This should not happen!
-	if(bFailed || !bRequestSuccessful)
-	{
-		LogError("[OnRequestComplete] Request failed");
-	}
+	JSONObject message = g_aMsgs.Get(0);
+
 	// Seems like the API is busy or too many message send recently
-	else if(eStatusCode == k_EHTTPStatusCode429TooManyRequests || eStatusCode == k_EHTTPStatusCode500InternalServerError)
+	if(response.Status == HTTPStatus_TooManyRequests || response.Status == HTTPStatus_InternalServerError)
 	{
 		if(!g_bSlowdown)
 			RestartMessageTimer(true);
 	}
 	// Wrong msg format, API doesn't like it
-	else if(eStatusCode == k_EHTTPStatusCode400BadRequest)
+	else if(response.Status == HTTPStatus_BadRequest)
 	{
 		char sMessage[4096];
-		g_aMsgs.GetString(0, sMessage, sizeof(sMessage));
+		message.GetString("content", sMessage, sizeof(sMessage));
+		if (!sMessage[0])
+			message.GetString("text", sMessage, sizeof(sMessage));
 
 		LogError("[OnRequestComplete] Bad Request! Error Code: [400]. Check your message, the API doesn't like it! Message: \"%s\"", sMessage); 
 
 		// Remove it, the API will never accept it like this.
+		delete message;
 		g_aWebhook.Erase(0);
 		g_aMsgs.Erase(0);
 	}
-	else if(eStatusCode == k_EHTTPStatusCode200OK || eStatusCode == k_EHTTPStatusCode204NoContent)
+	else if(response.Status == HTTPStatus_OK || response.Status == HTTPStatus_NoContent)
 	{
 		if(g_bSlowdown)
 			RestartMessageTimer(false);
 
+		delete message;
 		g_aWebhook.Erase(0);
 		g_aMsgs.Erase(0);
 	}
 	// Unknown error
 	else
 	{
-		LogError("[OnRequestComplete] Error Code: [%d]", eStatusCode);
+		LogError("[OnRequestComplete] Error Code: [%d]", response.Status);
 
+		delete message;
 		g_aWebhook.Erase(0);
 		g_aMsgs.Erase(0);
 	}
 
-	delete hRequest;
 	g_bSending = false;
 }
 
@@ -218,7 +200,7 @@ bool GetWebHook(const char[] sWebhook, char[] sUrl, int iLength)
 		SetFailState("[GetWebHook] Can't find webhook for \"%s\"!", sFile);
 		return false;
 	}
-	
+
 	char sBuffer[64];
 
 	do
