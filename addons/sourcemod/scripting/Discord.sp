@@ -1,8 +1,5 @@
 #include <sourcemod>
 #include <ripext>
-#include <sourcecomms>
-
-#define PLUGIN_VERSION "1.0"
 
 #pragma newdecls required
 
@@ -19,7 +16,7 @@ public Plugin myinfo =
 	name = "Discord API",
 	author = "maxime1907, inGame",
 	description = "Interact with the Discord API",
-	version = PLUGIN_VERSION,
+	version = "1.0.0",
 	url = "https://nide.gg"
 };
 
